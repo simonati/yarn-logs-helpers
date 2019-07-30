@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+set -e
+
+appid="$(yarn-appid "$1")"
+shift
+
+if [ $# -gt 0 ]; then
+  dest_dir="$1"
+else
+  dest_dir="$PWD/$appid"
+fi
+
+mkdir -p "$dest_dir"
+cd "$dest_dir"
+
+containers_dir="$dest_dir/containers"
+mkdir -p "$containers_dir"
+cd "$containers_dir"
+
+logfile="$dest_dir/logs"
+
+if [ -s "$logfile" ]; then
+  echo "Found existing logs file at $logfile; splitting per-container..."
+  split-yarn-logs-per-container "$logfile"
+else
+
+  echo "Downloading logs for $appid to $logfile and splitting per-container..."
+
+  if ! yarn logs -applicationId "$appid" > "$logfile"; then
+    if [ -n "$YARN_LOGS_USER" ]; then
+      echo "Caught error; fetching owner..."
+      owner="$(yarn application -list -appStates FINISHED,FAILED,KILLED | grep "$appid" | awk -F'\t' '{gsub(/^ +/, "", $4); gsub(/ +$/, "", $4); print $4 }')"
+      if [ -n "$owner" ]; then
+        echo "Found app owner: $owner; retrying fetching logs for $appid as user $YARN_LOGS_USER..."
+        sudo -u "$YARN_LOGS_USER" yarn logs -applicationId "$appid" -appOwner "$owner" > "$logfile"
+      else
+        echo "Unable to find application $appid" 1>&2
+        exit 1
+      fi
+    else
+      echo "Failed to fetch YARN logs; if this app was run by a user other than you, consider setting \$YARN_LOGS_USER and trying again." 1>&2
+      exit 1
+    fi
+  fi
+  cat "$logfile" | split-yarn-logs-per-container
+fi
+
+cd "$dest_dir"
+echo "Done downloading; rename and create per-host directories..."
+rename-and-link-hosts
+
+echo "Look for driver containers and application masters..."
+link-driver-logs
+link-app-masters
+
+echo "Creating EID symlinks..."
+link-eids
+
